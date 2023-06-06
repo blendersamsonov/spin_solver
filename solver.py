@@ -80,9 +80,9 @@ except FileNotFoundError:
 ## Tables for integrated probabilities ##
 #########################################
 
-TAB_CHI_N = 10_000
-TAB_CHI_XMIN_LOG = np.log10(3e-4)
-TAB_CHI_XMAX_LOG = 3
+TAB_CHI_N = 10_000                # The range should sufficiently cover the range \chi \sim 1.
+TAB_CHI_XMIN_LOG = np.log10(3e-4) # For \chi below 3e-4, the numerical integration is unstable and asymptotic expressions can be used.
+TAB_CHI_XMAX_LOG = 3              # For \chi larger than 1e3 asymptotic expressions can be used.
 TAB_CHI_RANGE = TAB_CHI_XMAX_LOG - TAB_CHI_XMIN_LOG
 TAB_CHI_XS = np.linspace(TAB_CHI_XMIN_LOG, TAB_CHI_XMAX_LOG, TAB_CHI_N)
 
@@ -121,7 +121,7 @@ def calc_bessels(x):
     i = int((x - TAB_BESSEL_XMIN) * TAB_BESSEL_N // TAB_BESSEL_RANGE)
     if x < TAB_BESSEL_XMIN:
         # z << 1
-        # K_\nu(z) -> \Gamma(\nu) / 2 * (2 / z)^{\nu}
+        # K_\nu(z) -> \Gamma(\nu) * 2^{\nu - 1} / z^{\nu}
         # \Gamma(1/3) / 2^{2/3} / \pi / \sqrt{3} = 0.3101455723097432
         # \Gamma(2/3) / 2^{1/3} / \pi / \sqrt{3} = 0.1975161718471919
         # IK_{1/3}(z) / \pi / \sqrt{3} -> 1 / 3 - 1 / (2^{2/3} \Gamma(2/3)) * z^{2/3}
@@ -133,8 +133,8 @@ def calc_bessels(x):
     
     elif i >= TAB_BESSEL_N - 1:
         # z >> 1
-        # K_\nu(z) -> \sqrt{\frac{\pi}{2z}}\exp{-z}
-        # IK_{1/3}(z) -> \sqrt{\frac{\pi}{2z}}\exp{-z}
+        # K_\nu(z) -> \sqrt{ \frac{ \pi }{ 2 z } } \ exp{-z}
+        # IK_{1/3}(z) -> \sqrt{ \frac{ \pi }{ 2 z } } \ exp{-z}
         # \sqrt{1 / 6 / \pi} = 0.2303294329808903
         asym = 0.2303294329808903 * np.exp(-x) / np.sqrt(x)
         return asym, asym, asym
@@ -169,16 +169,15 @@ def calc_u_integrals(chi):
 
     if x < TAB_CHI_XMIN_LOG:
         # \chi \ll 1
-        # 5 / 2 / \sqrt{3} = 1.443375672974065
-        # \sqrt{3} / 4 = 0.4330127018922193
+        # 5 / 2 / \sqrt{3} = 1.443375672974065 - From Baier-Katkov
+        # \sqrt{3} / 4 = 0.4330127018922193 - From Mathematica
         return 1.443375672974065*chi, 0.4330127018922193*chi*chi
         # Numerical approximation for Grad is 0.4288507664083324*chi*chi
     
     # TODO: asymptotics for Grad
     elif x > TAB_CHI_XMAX_LOG:
         # \chi \gg 1
-        # From Baier-Katkov
-        # 14 \Gamma(2/3) / 3^{7/3} = 1.460500129047159
+        # 14 \Gamma(2/3) / 3^{7/3} = 1.460500129047159 - From Baier-Katkov
         return 1.460500129047159*np.power(chi, 0.6666666667), TAB_GRAD_INT[-1]
         
     else:
@@ -207,15 +206,15 @@ def calc_u_integrals(chi):
 def push_higuerra(dt, ux, uy, uz, ex, ey, ez, bx, by, bz):
     # Higuera, A. V. and Cary, J. R., Phys. Plasmas 24, 052104 (2017)
     
-    uux = ux - ex * dt / 2
-    uuy = uy - ey * dt / 2
-    uuz = uz - ez * dt / 2
+    uux = ux - ex * dt * 0.5
+    uuy = uy - ey * dt * 0.5
+    uuz = uz - ez * dt * 0.5
     
-    g2 = 1 + uux*uux + uuy*uuy + uuz*uuz
+    g2 = 1.0 + uux*uux + uuy*uuy + uuz*uuz
     
-    bbx = - dt * bx / 2
-    bby = - dt * by / 2
-    bbz = - dt * bz / 2
+    bbx = - dt * bx * 0.5
+    bby = - dt * by * 0.5
+    bbz = - dt * bz * 0.5
 
     beta2 = bbx*bbx + bby*bby + bbz*bbz
     betau = uux*bbx + uuy*bby + uuz*bbz
@@ -223,22 +222,25 @@ def push_higuerra(dt, ux, uy, uz, ex, ey, ez, bx, by, bz):
     diff = g2 - beta2
     gamma_new2 = 0.5 * diff
     
-    diff = np.sqrt( diff * diff + 4 *( beta2 + betau * betau))
+    diff = np.sqrt( diff * diff + 4.0 * ( beta2 + betau * betau ) )
     gamma_new2 += 0.5 * diff
     
-    mult = 1 + beta2 / gamma_new2
+    gamma_new2_inv = 1.0 / gamma_new2
+    gamma_new2_inv_sqrt = np.sqrt(gamma_new2_inv)
     
-    uux = uux - (bby * uuz - bbz * uuy) / np.sqrt(gamma_new2) + bbx * betau / gamma_new2
-    uuy = uuy - (bbz * uux - bbx * uuz) / np.sqrt(gamma_new2) + bby * betau / gamma_new2
-    uuz = uuz - (bbx * uuy - bby * uux) / np.sqrt(gamma_new2) + bbz * betau / gamma_new2
+    uux = uux - (bby * uuz - bbz * uuy) * gamma_new2_inv_sqrt + bbx * betau * gamma_new2_inv
+    uuy = uuy - (bbz * uux - bbx * uuz) * gamma_new2_inv_sqrt + bby * betau * gamma_new2_inv
+    uuz = uuz - (bbx * uuy - bby * uux) * gamma_new2_inv_sqrt + bbz * betau * gamma_new2_inv
     
-    uux /= mult
-    uuy /= mult
-    uuz /= mult
+    mult = 1.0 / (1.0 + beta2 * gamma_new2_inv)
+    
+    uux *= mult
+    uuy *= mult
+    uuz *= mult
 
-    n_ux = ux - ex * dt + 2 * (uuy*bbz - uuz*bby) / np.sqrt(gamma_new2)
-    n_uy = uy - ey * dt + 2 * (uuz*bbx - uux*bbz) / np.sqrt(gamma_new2)
-    n_uz = uz - ez * dt + 2 * (uux*bby - uuy*bbx) / np.sqrt(gamma_new2)
+    n_ux = ux - ex * dt + 2.0 * (uuy * bbz - uuz * bby) * gamma_new2_inv_sqrt
+    n_uy = uy - ey * dt + 2.0 * (uuz * bbx - uux * bbz) * gamma_new2_inv_sqrt
+    n_uz = uz - ez * dt + 2.0 * (uux * bby - uuy * bbx) * gamma_new2_inv_sqrt
         
     return n_ux, n_uy, n_uz
 
@@ -292,7 +294,7 @@ def measure_spin(axis_x, axis_y, axis_z, av_prob, rng):
     axis_mod_inv = 1.0 / axis_mod
 
     # Probability that spin is co-directional with axis
-    prob_up = 0.5 * (1 + axis_mod / av_prob)
+    prob_up = 0.5 * (1.0 + axis_mod / av_prob)
 
     n_sx = axis_x * axis_mod_inv
     n_sy = axis_y * axis_mod_inv
@@ -481,7 +483,7 @@ def jitify_solve(fields):
         
     def solve(dt, r0, u0, s0, t0, steps, n_particles = None, n_out = None, rf_scheme = 0, recoil = True, selection = True, lamda = 1e-4, seed = None, progress = False, n_threads = None):
         """
-        Solves motions equations for given initial conditions. Different particles are proccessed in parallel
+        Solves motions equations for given initial conditions. Different particles are processed in parallel
         ---
         Parameters:
         
@@ -555,11 +557,15 @@ def jitify_solve(fields):
             r = np.broadcast_to(r0, (N, 3))
             u = np.broadcast_to(u0, (N, 3))
             s = np.broadcast_to(s0, (N, 3))
-        else:
+        
+        elif len(r0.shape) == 2 and r0.shape[1] == 3:
             r = r0
             u = u0
             s = s0
             N = r0.shape[0]
+
+        else:
+            raise Exception("Initial conditions must be an np.array with shape (3, ) or (N, 3), where N is number of particles. Aborting")
         
         if n_out is None or n_out > steps:
             n_out = steps
@@ -593,24 +599,14 @@ def jitify_solve(fields):
         @njit(nogil=True, fastmath = True, parallel=True)
         def loop_particles_progress(r0, u0, s0, sol, rng, pbar):
             for i in prange(n_particles):
-                x, y, z = r0[i, 0], r0[i, 1], r0[i, 2]
-                ux, uy, uz = u0[i, 0], u0[i, 1], u0[i, 2]
-                sx, sy, sz = s0[i, 0], s0[i, 1], s0[i, 2]
-                sol_part = np.zeros((n_out, 10))
-                loop_single(x, y, z, ux, uy, uz, sx, sy, sz, sol_part, rng)
-                sol[i] = sol_part
+                loop_single(r0[i, 0], r0[i, 1], r0[i, 2], u0[i, 0], u0[i, 1], u0[i, 2], s0[i, 0], s0[i, 1], s0[i, 2], sol[i], rng)
                 pbar.update(1)
             return sol
         
         @njit(nogil=True, fastmath = True, parallel=True)
         def loop_particles(r0, u0, s0, sol, rng):
             for i in prange(n_particles):
-                x, y, z = r0[i, 0], r0[i, 1], r0[i, 2]
-                ux, uy, uz = u0[i, 0], u0[i, 1], u0[i, 2]
-                sx, sy, sz = s0[i, 0], s0[i, 1], s0[i, 2]
-                sol_part = np.zeros((n_out, 10))
-                loop_single(x, y, z, ux, uy, uz, sx, sy, sz, sol_part, rng)
-                sol[i] = sol_part
+                loop_single(r0[i, 0], r0[i, 1], r0[i, 2], u0[i, 0], u0[i, 1], u0[i, 2], s0[i, 0], s0[i, 1], s0[i, 2], sol[i], rng)
             return sol
         
         if NUMBA_PROGRESS and progress:
@@ -675,9 +671,11 @@ try:
         omega = 2 * np.pi * c / lamda
         a0s = mc2 / hbar / omega
 
+        nb_fields = np.vectorize(njit(inline='always', fastmath = True)(fields))
+
         ts = xr_sol.t.values
         ns = xr_sol.n.values
-        ex, ey, ez, bx, by, bz = np.vectorize(fields)(xr_sol.t.values, xr_sol.x.values, xr_sol.y.values, xr_sol.z.values)
+        ex, ey, ez, bx, by, bz = nb_fields(xr_sol.t.values, xr_sol.x.values, xr_sol.y.values, xr_sol.z.values)
 
         ex = xr.DataArray(np.array(ex), coords=[('n',ns), ('t',ts)])
         ey = xr.DataArray(np.array(ey), coords=[('n',ns), ('t',ts)])
