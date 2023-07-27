@@ -118,7 +118,7 @@ except FileNotFoundError:
 
 @njit(inline='always', fastmath = True)
 def calc_bessels(x):
-    i = int((x - TAB_BESSEL_XMIN) * TAB_BESSEL_N // TAB_BESSEL_RANGE)
+    i = int((x - TAB_BESSEL_XMIN) * (TAB_BESSEL_N - 1) // TAB_BESSEL_RANGE)
     if x < TAB_BESSEL_XMIN:
         # z << 1
         # K_\nu(z) -> \Gamma(\nu) * 2^{\nu - 1} / z^{\nu}
@@ -144,20 +144,18 @@ def calc_bessels(x):
         x_b = TAB_BESSEL_XS[i + 1]
         
         denom = 1.0 / (x_b - x_a)
+        fac = (x - x_a) * denom
         
         y_a = TAB_K13[i]
         y_b = TAB_K13[i + 1]
-        fac = (x - x_a) * denom
         k13 = fac * (y_b - y_a) + y_a
         
         y_a = TAB_K23[i]
         y_b = TAB_K23[i + 1]
-        fac = (x - x_a) * denom
         k23 = fac * (y_b - y_a) + y_a
         
         y_a = TAB_INTK13[i]
         y_b = TAB_INTK13[i + 1]
-        fac = (x - x_a) * denom
         intk13 = fac * (y_b - y_a) + y_a
         
         return k13, k23, intk13
@@ -165,20 +163,24 @@ def calc_bessels(x):
 @njit(inline='always', fastmath = True)
 def calc_u_integrals(chi):
     x = np.log10(chi)
-    i = int((x - TAB_CHI_XMIN_LOG) * TAB_CHI_N // TAB_CHI_RANGE)
+    i = int((x - TAB_CHI_XMIN_LOG) * (TAB_CHI_N - 1) // TAB_CHI_RANGE)
 
     if x < TAB_CHI_XMIN_LOG:
         # \chi \ll 1
+        # Wrad:
         # 5 / 2 / \sqrt{3} = 1.443375672974065 - From Baier-Katkov
+        # Grad:
         # \sqrt{3} / 4 = 0.4330127018922193 - From Mathematica
+        # 0.4288507664083324 - Numerical approximation
         return 1.443375672974065*chi, 0.4330127018922193*chi*chi
-        # Numerical approximation for Grad is 0.4288507664083324*chi*chi
     
-    # TODO: asymptotics for Grad
     elif x > TAB_CHI_XMAX_LOG:
         # \chi \gg 1
+        # Wrad
         # 14 \Gamma(2/3) / 3^{7/3} = 1.460500129047159 - From Baier-Katkov
-        return 1.460500129047159*np.power(chi, 0.6666666667), TAB_GRAD_INT[-1]
+        # Grad
+        # \Gamma(1/3) / 3^{8/3} = 0.1430999240948966 - From Mathematica
+        return 1.460500129047159*np.power(chi, 0.6666666667), 0.1430999240948966*np.power(chi, 0.3333333333)
         
     else:
         x_a = TAB_CHI_XS[i]
@@ -224,7 +226,7 @@ def push_higuerra(dt, ux, uy, uz, ex, ey, ez, bx, by, bz):
     
     diff = np.sqrt( diff * diff + 4.0 * ( beta2 + betau * betau ) )
     gamma_new2 += 0.5 * diff
-    
+
     gamma_new2_inv = 1.0 / gamma_new2
     gamma_new2_inv_sqrt = np.sqrt(gamma_new2_inv)
     
@@ -241,6 +243,10 @@ def push_higuerra(dt, ux, uy, uz, ex, ey, ez, bx, by, bz):
     n_ux = ux - ex * dt + 2.0 * (uuy * bbz - uuz * bby) * gamma_new2_inv_sqrt
     n_uy = uy - ey * dt + 2.0 * (uuz * bbx - uux * bbz) * gamma_new2_inv_sqrt
     n_uz = uz - ez * dt + 2.0 * (uux * bby - uuy * bbx) * gamma_new2_inv_sqrt
+    
+    n_ux = ux
+    n_uy = uy
+    n_uz = uz
         
     return n_ux, n_uy, n_uz
 
@@ -284,108 +290,79 @@ def push_tbmt(dt, sx, sy, sz, ux, uy, uz, ex, ey, ez, bx, by, bz):
     
     return n_sx, n_sy, n_sz
 
-######################################################################
-## Helper function for choosing between spin-up and spin-down state ##
-######################################################################
-
-@njit(inline='always', fastmath = True)
-def measure_spin(axis_x, axis_y, axis_z, av_prob, rng):
-    axis_mod = np.sqrt(axis_x * axis_x + axis_y * axis_y + axis_z * axis_z)
-    axis_mod_inv = 1.0 / axis_mod
-
-    # Probability that spin is co-directional with axis
-    prob_up = 0.5 * (1.0 + axis_mod / av_prob)
-
-    n_sx = axis_x * axis_mod_inv
-    n_sy = axis_y * axis_mod_inv
-    n_sz = axis_z * axis_mod_inv
-
-    if rng.random() > prob_up:
-        n_sx *= -1.0
-        n_sy *= -1.0
-        n_sz *= -1.0
-
-    return n_sx, n_sy, n_sz
-
-######################
-## Single time-step ##
-######################
-
 @njit(fastmath = True)
-def step_numba(dt, t, x, y, z, ux, uy, uz, sx, sy, sz, rf_scheme, a0s, fields, rng, recoil, selection):
-    ex, ey, ez, bx, by, bz = fields(t, x, y, z)
-    
-    n_ux, n_uy, n_uz = push_higuerra(dt, ux, uy, uz, ex, ey, ez, bx, by, bz)
-    n_g = np.sqrt(1.0 + n_ux**2 + n_uy**2 + n_uz**2)
-    n_g_inv = 1.0 / n_g
-    
-    n_x = x + dt * n_ux * n_g_inv
-    n_y = y + dt * n_uy * n_g_inv
-    n_z = z + dt * n_uz * n_g_inv
-    
-    n_sx, n_sy, n_sz = sx, sy, sz
-
-    if rf_scheme == 0:
-        n_sx, n_sy, n_sz = push_tbmt(dt, sx, sy, sz, ux, uy, uz, ex, ey, ez, bx, by, bz)
-        return n_x, n_y, n_z, n_ux, n_uy, n_uz, n_sx, n_sy, n_sz
-    
-    # Radiation reaction (rf_scheme > 0)
+def nc_radiation(dt, ex, ey, ez, bx, by, bz, ux, uy, uz, sx, sy, sz, rf_scheme, a0s, recoil, selection):
     g = np.sqrt(1.0 + ux * ux + uy * uy + uz * uz)
+    g_inv = 1.0 / g
+
+    fx = - ex - (uy * bz - uz * by) * g_inv 
+    fy = - ey - (uz * bx - ux * bz) * g_inv
+    fz = - ez - (ux * by - uy * bx) * g_inv
+
+    chi = np.sqrt(g * g * (fx * fx + fy * fy + fz * fz) - np.power(ux * fx + uy * fy + uz * fz, 2)) / a0s
     
-    m_g = 0.5 * (n_g + g) # energy at the time i where coordinates are defined
-    m_g_inv = 1.0 / m_g
+    d_ux, d_uy, d_uz = 0.0, 0.0, 0.0
 
-    m_ux = 0.5 * (n_ux + ux)
-    m_uy = 0.5 * (n_uy + uy) # momentum at i
-    m_uz = 0.5 * (n_uz + uz)
-
-    fx = - ex - (m_uy * bz - m_uz * by) * m_g_inv 
-    fy = - ey - (m_uz * bx - m_ux * bz) * m_g_inv # force at i
-    fz = - ez - (m_ux * by - m_uy * bx) * m_g_inv
-
-    chi = np.sqrt(m_g * m_g * (fx * fx + fy * fy + fz * fz) - np.power(m_ux * fx + m_uy * fy + m_uz * fz, 2)) / a0s
-    
     if rf_scheme > 3:
         # Semi-classical radiation reaction
         # TODO: Might use tabulated function here as well
         
-        frr = dt * 2.0 / 3.0 * alpha * a0s * chi**2 * m_g_inv
+        frr = dt * 2.0 / 3.0 * alpha * a0s * chi**2 * g_inv
 
         if rf_scheme == 5:
             frr *= np.power( 1 + 18 * chi + 69 * chi**2 + 73 * chi**3 + 5.804 * chi**4 ,-1/3)
         
-        n_ux -= frr * m_ux
-        n_uy -= frr * m_uy
-        n_uz -= frr * m_uz
+        d_ux = frr * ux
+        d_uy = frr * uy
+        d_uz = frr * uz
         
-        n_sx, n_sy, n_sz = push_tbmt(dt, sx, sy, sz, ux, uy, uz, ex, ey, ez, bx, by, bz)
-        
-        return n_x, n_y, n_z, n_ux, n_uy, n_uz, n_sx, n_sy, n_sz
+        return d_ux, d_uy, d_uz, sx, sy, sz
 
     elif rf_scheme < 4:
         # Quantum radiation reaction
+
+        multiplier = dt * alpha * a0s * g_inv
+        Wrad_tot, Grad_tot = calc_u_integrals(chi)
+               
+        # Sub-stepping assuming constant fields during time interval \Delta t
+        if Wrad_tot * multiplier > 0.125:
+            # print('substepping')
+            d_ux1, d_uy1, d_uz1, n_sx, n_sy, n_sz = nc_radiation(0.5 * dt, ex, ey, ez, bx, by, bz, ux, uy, uz, sx, sy, sz, rf_scheme, a0s, recoil, selection)
+
+            ux -= d_ux1
+            uy -= d_uy1
+            uz -= d_uz1
+            
+            d_ux, d_uy, d_uz, n_sx, n_sy, n_sz = nc_radiation(0.5 * dt, ex, ey, ez, bx, by, bz, ux, uy, uz, n_sx, n_sy, n_sz, rf_scheme, a0s, recoil, selection)
+
+            d_ux += d_ux1
+            d_uy += d_uy1
+            d_uz += d_uz1
+            
+            return d_ux, d_uy, d_uz, n_sx, n_sy, n_sz
     
-        u = rng.random()
-        r = u*u*u # ratio of the emitted photon energy to the electron energy, modified event generator from  A. Gonoskov et al. Phys. Rev. E 92, 023305 (2015)
+
+        u = np.random.random()
+        r = u*u*u # ratio of the emitted photon energy to the electron energy, modified event generator from A. Gonoskov et al. Phys. Rev. E 92, 023305 (2015)
         
+        # Skipping if radiated energy is larger than electron's kinetic energy
+        if ( 1.0 - r ) * g < 1.0:
+            return d_uz, d_uy, d_uz, sx, sy, sz
+
         bessel_arg = 2.0 / 3.0 * r / ( 1.0 - r ) / chi # argument of bessel functions
         k13, k23, intk13 = calc_bessels(bessel_arg)
         wrad = ( 2.0 + r * r / ( 1.0 - r ) )  * k23 - intk13
-        
-        w_tot = 0
-        if ( 1.0 - r ) * m_g < 1.0:
-            n_sx, n_sy, n_sz = push_tbmt(dt, sx, sy, sz, ux, uy, uz, ex, ey, ez, bx, by, bz)
-            return n_x, n_y, n_z, n_ux, n_uy, n_uz, sx, sy, sz
+        w_tot = 0        
         
         if rf_scheme == 1:
             w_tot = wrad
 
         if rf_scheme > 1:
-            modu_inv = 1.0 / np.sqrt(m_ux * m_ux + m_uy * m_uy + m_uz * m_uz)
+            modu_inv = 1.0 / np.sqrt(ux * ux + uy * uy + uz * uz)
 
-            evx = m_ux * modu_inv
-            evy = m_uy * modu_inv # direction along the electron velocity
-            evz = m_uz * modu_inv
+            evx = ux * modu_inv
+            evy = uy * modu_inv # direction along the electron velocity
+            evz = uz * modu_inv
 
             f2v = fx * evx + fy * evy + fz * evz
 
@@ -407,27 +384,18 @@ def step_numba(dt, t, x, y, z, ux, uy, uz, sx, sy, sz, rf_scheme, a0s, fields, r
             
             g_rad = - r * k13
             w_tot = wrad + g_rad * sie2
-            
-                    
         
-        multiplier = dt * alpha * a0s * m_g_inv
         # Total probability to emit in time interval dt
         # 3u^2 is the 'weight' of the current sample due to non-uniform sampling
         w_int = w_tot * 3 * u * u * multiplier
         
-        # Sub-stepping. Might be not exactly accurate, since momenta and positions are offset with current delta t
-        if w_int > 1:
-            n_x, n_y, n_z, n_ux, n_uy, n_uz, n_sx, n_sy, n_sz, = step_numba(0.5*dt, t, x, y, z, ux, uy, uz, sx, sy, sz, rf_scheme, a0s, fields, rng, recoil, selection)
-            n_x, n_y, n_z, n_ux, n_uy, n_uz, n_sx, n_sy, n_sz, = step_numba(0.5*dt, t+0.5*dt, n_x, n_y, n_z, n_ux, n_uy, n_uz, n_sx, n_sy, n_sz, rf_scheme, a0s, fields, rng, recoil, selection)
-            return n_x, n_y, n_z, n_ux, n_uy, n_uz, n_sx, n_sy, n_sz
-        
         # Radiation actually happened
-        elif w_int > rng.random():
+        if np.random.random() < w_int:
             
             if recoil:
-                n_ux -= r * m_ux
-                n_uy -= r * m_uy # recoil
-                n_uz -= r * m_uz
+                d_ux = r * ux
+                d_uy = r * uy # recoil
+                d_uz = r * uz
             
             if rf_scheme > 1:
                 e2_coeff = - r / ( 1.0 - r ) * k13
@@ -442,10 +410,7 @@ def step_numba(dt, t, x, y, z, ux, uy, uz, sx, sy, sz, rf_scheme, a0s, fields, r
         # No radiation polarization (selection effect)
         elif rf_scheme > 1:
             if not selection:
-                n_sx, n_sy, n_sz = push_tbmt(dt, n_sx, n_sy, n_sz, ux, uy, uz, ex, ey, ez, bx, by, bz)
-                return n_x, n_y, n_z, n_ux, n_uy, n_uz, n_sx, n_sy, n_sz
-            
-            Wrad_tot, Grad_tot = calc_u_integrals(chi)
+                return d_ux, d_uy, d_uz, sx, sy, sz
             
             # total probability that photon is not emitted during this step
             w_tot = 1.0 - multiplier * (Wrad_tot - Grad_tot * sie2)
@@ -458,14 +423,82 @@ def step_numba(dt, t, x, y, z, ux, uy, uz, sx, sy, sz, rf_scheme, a0s, fields, r
             q_axis_z = e2_coeff * e2z + si_coeff * sz
             
         if rf_scheme == 2:
-            n_sx, n_sy, n_sz = measure_spin(q_axis_x, q_axis_y, q_axis_z, w_tot, rng)
+            n_sx, n_sy, n_sz = measure_spin(q_axis_x, q_axis_y, q_axis_z, w_tot)
 
         elif rf_scheme == 3:
             n_sx, n_sy, n_sz = q_axis_x / w_tot, q_axis_y / w_tot, q_axis_z / w_tot
             
-        n_sx, n_sy, n_sz = push_tbmt(dt, n_sx, n_sy, n_sz, ux, uy, uz, ex, ey, ez, bx, by, bz)
 
+        return d_ux, d_uy, d_uz, n_sx, n_sy, n_sz
+
+######################################################################
+## Helper function for choosing between spin-up and spin-down state ##
+######################################################################
+
+@njit(inline='always', fastmath = True)
+def measure_spin(axis_x, axis_y, axis_z, av_prob):
+    axis_mod = np.sqrt(axis_x * axis_x + axis_y * axis_y + axis_z * axis_z)
+    axis_mod_inv = 1.0 / axis_mod
+
+    # Probability that spin is co-directional with axis
+    prob_up = 0.5 * (1.0 + axis_mod / av_prob)
+
+    n_sx = axis_x * axis_mod_inv
+    n_sy = axis_y * axis_mod_inv
+    n_sz = axis_z * axis_mod_inv
+
+    if np.random.random() > prob_up:
+        n_sx *= -1.0
+        n_sy *= -1.0
+        n_sz *= -1.0
+
+    return n_sx, n_sy, n_sz
+
+######################
+## Single time-step ##
+######################
+
+@njit(fastmath = True)
+def step_numba(dt, t, x, y, z, ux, uy, uz, sx, sy, sz, rf_scheme, a0s, fields, recoil, selection):
+    ex, ey, ez, bx, by, bz = fields(t, x, y, z)
+    
+    # n_ux = ux
+    # n_uy = uy
+    # n_uz = uz
+    
+    n_ux, n_uy, n_uz = push_higuerra(dt, ux, uy, uz, ex, ey, ez, bx, by, bz)
+    n_g = np.sqrt(1.0 + n_ux**2 + n_uy**2 + n_uz**2)
+    n_g_inv = 1.0 / n_g
+
+    # n_x = x
+    # n_y = y
+    # n_z = z
+    
+    n_x = x + dt * n_ux * n_g_inv
+    n_y = y + dt * n_uy * n_g_inv
+    n_z = z + dt * n_uz * n_g_inv
+    
+    n_sx, n_sy, n_sz = sx, sy, sz
+
+    if rf_scheme == 0:
+        n_sx, n_sy, n_sz = push_tbmt(dt, sx, sy, sz, ux, uy, uz, ex, ey, ez, bx, by, bz)
         return n_x, n_y, n_z, n_ux, n_uy, n_uz, n_sx, n_sy, n_sz
+    
+    # Radiation reaction (rf_scheme > 0)
+
+    m_ux = 0.5 * (n_ux + ux)
+    m_uy = 0.5 * (n_uy + uy) # momentum at i
+    m_uz = 0.5 * (n_uz + uz)
+
+    d_ux, d_uy, d_uz, n_sx, n_sy, n_sz = nc_radiation(dt, ex, ey, ez, bx, by, bz, m_ux, m_uy, m_uz, sx, sy, sz, rf_scheme, a0s, recoil, selection)
+
+    n_ux -= d_ux
+    n_uy -= d_uy
+    n_uz -= d_uz
+
+    n_sx, n_sy, n_sz = push_tbmt(dt, n_sx, n_sy, n_sz, ux, uy, uz, ex, ey, ez, bx, by, bz)
+
+    return n_x, n_y, n_z, n_ux, n_uy, n_uz, n_sx, n_sy, n_sz
 
 def jitify_solve(fields):
     """
@@ -542,8 +575,6 @@ def jitify_solve(fields):
             NUMBA_THREADS = n_threads
 
         nb.set_num_threads(NUMBA_THREADS)
-
-        rng = np.random.default_rng(seed)
         
         if r0.shape != u0.shape or r0.shape != s0.shape:
             raise Exception("Inconsistent shape of initial conditions. Aborting")
@@ -567,6 +598,10 @@ def jitify_solve(fields):
         else:
             raise Exception("Initial conditions must be an np.array with shape (3, ) or (N, 3), where N is number of particles. Aborting")
         
+        r = r.astype(np.float64)
+        u = u.astype(np.float64)
+        s = s.astype(np.float64)
+
         if n_out is None or n_out > steps:
             n_out = steps
         
@@ -578,12 +613,12 @@ def jitify_solve(fields):
         out_step = int(steps / n_out)
                 
         @njit(nogil=True, fastmath = True)
-        def loop_single(x, y, z, ux, uy, uz, sx, sy, sz, sol, rng):
+        def loop_single(x, y, z, ux, uy, uz, sx, sy, sz, sol):
             try:
                 t = t0
 
                 # half-step back for momenta without radiation reaction
-                _, _, _, ux, uy, uz, _, _, _ = step_numba(- 0.5 * dt, t, x, y, z, ux, uy, uz, sx, sy, sz, 0, a0s, nb_fields, rng, recoil, selection)
+                _, _, _, ux, uy, uz, _, _, _ = step_numba(- 0.5 * dt, t, x, y, z, ux, uy, uz, sx, sy, sz, 0, a0s, nb_fields, recoil, selection)
 
                 k = 0
                 for j in range(steps):
@@ -591,36 +626,38 @@ def jitify_solve(fields):
                         sol[k, :] = t, x, y, z, ux, uy, uz, sx, sy, sz
                         k += 1
 
-                    x, y, z, ux, uy, uz, sx, sy, sz = step_numba(dt, t, x, y, z, ux, uy, uz, sx, sy, sz, rf_scheme, a0s, nb_fields, rng, recoil, selection)
+                    x, y, z, ux, uy, uz, sx, sy, sz = step_numba(dt, t, x, y, z, ux, uy, uz, sx, sy, sz, rf_scheme, a0s, nb_fields, recoil, selection)
                     t += dt
             except Exception:
                 return
         
         @njit(nogil=True, fastmath = True, parallel=True)
-        def loop_particles_progress(r0, u0, s0, sol, rng, pbar):
+        def loop_particles_progress(r0, u0, s0, sol, pbar):
             for i in prange(n_particles):
-                loop_single(r0[i, 0], r0[i, 1], r0[i, 2], u0[i, 0], u0[i, 1], u0[i, 2], s0[i, 0], s0[i, 1], s0[i, 2], sol[i], rng)
+                loop_single(r0[i, 0], r0[i, 1], r0[i, 2], u0[i, 0], u0[i, 1], u0[i, 2], s0[i, 0], s0[i, 1], s0[i, 2], sol[i])
                 pbar.update(1)
             return sol
         
         @njit(nogil=True, fastmath = True, parallel=True)
-        def loop_particles(r0, u0, s0, sol, rng):
+        def loop_particles(r0, u0, s0, sol):
             for i in prange(n_particles):
-                loop_single(r0[i, 0], r0[i, 1], r0[i, 2], u0[i, 0], u0[i, 1], u0[i, 2], s0[i, 0], s0[i, 1], s0[i, 2], sol[i], rng)
+                loop_single(r0[i, 0], r0[i, 1], r0[i, 2], u0[i, 0], u0[i, 1], u0[i, 2], s0[i, 0], s0[i, 1], s0[i, 2], sol[i])
             return sol
         
         if NUMBA_PROGRESS and progress:
             # TODO: show number of performed steps for a single particle
             pbar = ProgressBar(total = N)
-            sol = loop_particles_progress(r, u, s, sol, rng, pbar)
+            sol = loop_particles_progress(r, u, s, sol, pbar)
             pbar.close()
         else:
-            sol = loop_particles(r, u, s, sol, rng)
+            sol = loop_particles(r, u, s, sol, )
         
         return sol
     
     # Precompiling ??
+    # print("Compiling...", end='', flush=True)
     # solve(0.1, np.array([0, 0, 0]), np.array([0, 0, 0]), np.array([0, 0, 0]), 0, 10, 10, rf_scheme = 0)
+    # print("Done")
     
     return solve
 
